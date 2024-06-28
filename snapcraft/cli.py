@@ -1,6 +1,6 @@
 # -*- Mode:Python; indent-tabs-mode:nil; tab-width:4 -*-
 #
-# Copyright 2022-2023 Canonical Ltd.
+# Copyright 2022-2024 Canonical Ltd.
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 3 as
@@ -27,6 +27,7 @@ import craft_application.commands
 import craft_cli
 import craft_store
 from craft_application.errors import RemoteBuildError
+from craft_application.util import strtobool
 from craft_cli import ArgumentParsingError, EmitterMode, ProvideHelpException, emit
 from craft_providers import ProviderError
 
@@ -183,7 +184,7 @@ def get_verbosity() -> EmitterMode:
 
     with contextlib.suppress(ValueError):
         # Parse environment variable for backwards compatibility with launchpad
-        if utils.strtobool(os.getenv("SNAPCRAFT_ENABLE_DEVELOPER_DEBUG", "n").strip()):
+        if strtobool(os.getenv("SNAPCRAFT_ENABLE_DEVELOPER_DEBUG", "n").strip()):
             verbosity = EmitterMode.DEBUG
 
     # if defined, use environmental variable SNAPCRAFT_VERBOSITY_LEVEL
@@ -246,7 +247,6 @@ def _emit_error(error, cause=None):
     emit.error(error)
 
 
-# pylint: disable-next=too-many-statements
 def run():  # noqa: C901 (complex-structure)
     """Run the CLI."""
     dispatcher = get_dispatcher()
@@ -264,8 +264,7 @@ def run():  # noqa: C901 (complex-structure)
         with contextlib.suppress(KeyError, IndexError):
             if (
                 err.__context__ is not None
-                and err.__context__.args[0]  # pylint: disable=no-member
-                not in dispatcher.commands
+                and err.__context__.args[0] not in dispatcher.commands
             ):
                 run_legacy(err)
         print(err, file=sys.stderr)  # to stderr, as argparse normally does

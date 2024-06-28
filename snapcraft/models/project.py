@@ -14,16 +14,14 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-# pylint: disable=too-many-lines
-
 """Project file definition and helpers."""
 from __future__ import annotations
 
-# pylint: disable=too-many-lines
 import copy
 import re
 from typing import (
     TYPE_CHECKING,
+    Annotated,
     Any,
     Dict,
     List,
@@ -46,7 +44,7 @@ from craft_providers import bases
 from pydantic import PrivateAttr, constr
 from typing_extensions import Self, override
 
-from snapcraft import errors, utils
+from snapcraft import utils
 from snapcraft.const import SUPPORTED_ARCHS, SnapArch
 from snapcraft.elf.elf_utils import get_arch_triplet
 from snapcraft.errors import ProjectValidationError
@@ -504,13 +502,17 @@ class ContentPlug(models.CraftBaseModel):
         return default_provider
 
 
-class Platform(models.CraftBaseModel):
+class Platform(models.Platform):
     """Snapcraft project platform definition."""
 
-    build_on: list[SnapArch] | None = pydantic.Field(min_items=1, unique_items=True)
-    build_for: list[SnapArch] | None = pydantic.Field(
-        min_items=1, max_items=1, unique_items=True
-    )
+    build_on: Annotated[  # type: ignore[assignment,reportIncompatibleVariableOverride]
+        list[SnapArch] | None,
+        pydantic.Field(min_items=1, unique_items=True),
+    ]
+    build_for: Annotated[  # type: ignore[assignment,reportIncompatibleVariableOverride]
+        list[SnapArch | Literal["all"]] | None,
+        pydantic.Field(min_items=1, max_items=1, unique_items=True),
+    ]
 
     @pydantic.validator("build_on", "build_for", pre=True)
     @classmethod
@@ -555,12 +557,7 @@ class Platform(models.CraftBaseModel):
                     else:
                         build_for = cast(UniqueStrList, architecture.build_for)
 
-            if "all" in build_for:
-                raise errors.ArchAllInvalid()
-            platforms[build_for[0]] = cls(
-                build_for=build_for,
-                build_on=build_on,
-            )
+            platforms[build_for[0]] = cls(build_for=build_for, build_on=build_on)
 
         return platforms
 
@@ -617,6 +614,7 @@ class Project(models.Project):
     ]
     grade: Optional[Literal["stable", "devel"]]
     architectures: List[Union[str, Architecture]] | None = None
+    platforms: dict[str, Platform] | None = None  # type: ignore[assignment,reportIncompatibleVariableOverride]
     assumes: UniqueStrList = cast(UniqueStrList, [])
     package_repositories: Optional[List[Dict[str, Any]]]
     hooks: Optional[Dict[str, Hook]]
@@ -648,9 +646,15 @@ class Project(models.Project):
         """
         if base == "bare":
             return None
+        # Desktop bases are extended versions of the regular core bases.
+        # For bases that end with "-desktop", use the equivalent provider base.
+        if base.endswith("-desktop"):
+            core_base = base.rpartition("-")[0]
+        else:
+            core_base = base
 
         try:
-            return SNAPCRAFT_BASE_TO_PROVIDER_BASE[base]
+            return SNAPCRAFT_BASE_TO_PROVIDER_BASE[core_base]
         except KeyError as err:
             raise CraftValidationError(f"Unknown base {base!r}") from err
 
@@ -944,7 +948,6 @@ class Project(models.Project):
 
     def get_build_on(self) -> str:
         """Get the first build_on architecture from the project for core22."""
-        # pylint: disable=unsubscriptable-object
         if (
             self.architectures
             and isinstance(self.architectures[0], Architecture)
@@ -957,7 +960,6 @@ class Project(models.Project):
 
     def get_build_for(self) -> str:
         """Get the first build_for architecture from the project for core22."""
-        # pylint: disable=unsubscriptable-object
         if (
             self.architectures
             and isinstance(self.architectures[0], Architecture)
@@ -1118,9 +1120,7 @@ class ComponentProject(models.CraftBaseModel, extra=pydantic.Extra.ignore):
         return _get_partitions_from_components(self.components)
 
 
-def _format_pydantic_errors(  # pylint: disable=redefined-outer-name
-    errors, *, file_name: str = "snapcraft.yaml"
-):
+def _format_pydantic_errors(errors, *, file_name: str = "snapcraft.yaml"):
     """Format errors.
 
     Example 1: Single error.
@@ -1242,7 +1242,7 @@ class SnapcraftBuildPlanner(models.BuildPlanner):
     base: str | None
     build_base: str | None = None
     name: str
-    platforms: dict[str, Any] | None = None
+    platforms: dict[str, Platform] | None = None  # type: ignore[assignment]
     architectures: List[Union[str, Architecture]] | None = None
     project_type: str | None = pydantic.Field(default=None, alias="type")
 
@@ -1251,7 +1251,7 @@ class SnapcraftBuildPlanner(models.BuildPlanner):
     def _validate_all_platforms(cls, platforms: dict[str, Any]) -> dict[str, Any]:
         """Validate and convert platform data to a dict of Platforms."""
         for platform_label in platforms:
-            platform_data: dict[str, Any] = (
+            platform_data: Platform | dict[str, Any] = (
                 platforms[platform_label] if platforms[platform_label] else {}
             )
             error_prefix = f"Error for platform entry '{platform_label}'"
@@ -1263,7 +1263,7 @@ class SnapcraftBuildPlanner(models.BuildPlanner):
                 try:
                     platform = Platform(**platform_data)
                 except CraftValidationError as err:
-                    raise CraftValidationError(f"{error_prefix}: {str(err)}") from None
+                    raise ValueError(f"{error_prefix}: {str(err)}") from None
 
             # build_on and build_for are validated
             # let's also validate the platform label
@@ -1278,7 +1278,7 @@ class SnapcraftBuildPlanner(models.BuildPlanner):
             if platform.build_for:
                 build_target = platform.build_for[0]
                 if platform_label in SUPPORTED_ARCHS and platform_label != build_target:
-                    raise CraftValidationError(
+                    raise ValueError(
                         str(
                             f"{error_prefix}: if 'build_for' is provided and the "
                             "platform entry label corresponds to a valid architecture, then "
@@ -1287,7 +1287,7 @@ class SnapcraftBuildPlanner(models.BuildPlanner):
                     )
             # if no build-for is present, then the platform label needs to be a valid architecture
             elif platform_label not in SUPPORTED_ARCHS:
-                raise CraftValidationError(
+                raise ValueError(
                     str(
                         f"{error_prefix}: platform entry label must correspond to a "
                         "valid architecture if 'build-for' is not provided."
@@ -1296,7 +1296,7 @@ class SnapcraftBuildPlanner(models.BuildPlanner):
 
             # Both build and target architectures must be supported
             if not any(b_o in SUPPORTED_ARCHS for b_o in build_on_one_of):
-                raise CraftValidationError(
+                raise ValueError(
                     str(
                         f"{error_prefix}: trying to build snap in one of "
                         f"{build_on_one_of}, but none of these build architectures are supported. "
@@ -1327,14 +1327,21 @@ class SnapcraftBuildPlanner(models.BuildPlanner):
 
         # set default value
         if self.platforms is None:
-            self.platforms = {get_host_architecture(): None}
+            self.platforms = {
+                get_host_architecture(): Platform(
+                    build_on=[SnapArch(get_host_architecture())],
+                    build_for=[SnapArch(get_host_architecture())],
+                )
+            }
             # For backwards compatibility with core22, convert the platforms.
             if effective_base == "22.04" and self.architectures:
-                self.platforms = Platform.from_architectures(self.architectures)
+                self.platforms = (  # type: ignore[reportIncompatibleVariableOverride]
+                    Platform.from_architectures(self.architectures)
+                )
 
         for platform_entry, platform in self.platforms.items():
-            for build_for in platform.build_for or [platform_entry]:
-                for build_on in platform.build_on or [platform_entry]:
+            for build_for in platform.build_for or [SnapArch(platform_entry)]:
+                for build_on in platform.build_on or [SnapArch(platform_entry)]:
                     build_infos.append(
                         BuildInfo(
                             platform=platform_entry,

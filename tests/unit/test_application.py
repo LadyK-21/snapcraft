@@ -14,12 +14,15 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 """Unit tests for application classes."""
+
 import json
 import os
 import sys
 from textwrap import dedent
 
 import craft_cli
+import craft_parts.plugins
+import craft_store
 import pytest
 import yaml
 from craft_application import util
@@ -308,13 +311,45 @@ def test_application_plugins():
     assert "kernel" not in plugins
 
 
-def test_application_dotnet_not_registered():
-    """dotnet plugin is disable for core24."""
+@pytest.mark.parametrize(
+    ("base", "build_base"),
+    [
+        ("core20", None),
+        ("core20", "core20"),
+        ("core20", "devel"),
+        ("core22", None),
+        ("core22", "core22"),
+        ("core22", "devel"),
+    ],
+)
+def test_application_dotnet_registered(base, build_base, snapcraft_yaml):
+    """dotnet plugin is enabled for core22."""
+    snapcraft_yaml(base=base, build_base=build_base)
     app = application.create_app()
 
-    plugins = app._get_app_plugins()
+    app._register_default_plugins()
 
-    assert "dotnet" not in plugins
+    assert "dotnet" in craft_parts.plugins.get_registered_plugins()
+
+
+@pytest.mark.parametrize(
+    ("base", "build_base"),
+    [
+        ("core24", None),
+        ("core24", "core20"),
+        ("core24", "core22"),
+        ("core24", "core24"),
+        ("core24", "devel"),
+    ],
+)
+def test_application_dotnet_not_registered(base, build_base, snapcraft_yaml):
+    """dotnet plugin is disabled for core24 and newer bases."""
+    snapcraft_yaml(base=base, build_base=build_base)
+    app = application.create_app()
+
+    app._register_default_plugins()
+
+    assert "dotnet" not in craft_parts.plugins.get_registered_plugins()
 
 
 def test_default_command_integrated(monkeypatch, mocker, new_dir):
@@ -482,4 +517,76 @@ def test_run_envvar_invalid(snapcraft_yaml, base, monkeypatch):
         "Unknown value 'badvalue' in environment variable "
         "'SNAPCRAFT_REMOTE_BUILD_STRATEGY'. Valid values are 'disable-fallback' and "
         "'force-fallback'"
+    )
+
+
+@pytest.mark.parametrize(
+    ("base", "build_base", "is_known_core24"),
+    [
+        ("core20", None, False),
+        ("core20", "core20", False),
+        ("core20", "devel", False),
+        ("core22", None, False),
+        ("core22", "core22", False),
+        ("core22", "devel", False),
+        ("core24", "core22", True),
+        ("core24", None, True),
+        ("core24", "core24", True),
+        ("core24", "devel", True),
+    ],
+)
+def test_known_core24(snapcraft_yaml, base, build_base, is_known_core24):
+    snapcraft_yaml(base=base, build_base=build_base)
+
+    app = application.create_app()
+
+    assert app._known_core24 == is_known_core24
+
+
+@pytest.mark.parametrize(
+    ("message", "resolution", "expected_message"),
+    [
+        (
+            "error message",
+            "error resolution",
+            "error message\nRecommended resolution: error resolution",
+        ),
+        ("error message", None, "error message"),
+    ],
+)
+def test_store_error(mocker, capsys, message, resolution, expected_message):
+    mocker.patch(
+        "snapcraft.application.Application.run",
+        side_effect=craft_store.errors.CraftStoreError(message, resolution=resolution),
+    )
+
+    return_code = application.main()
+
+    assert return_code == 1
+    _, err = capsys.readouterr()
+    assert f"craft-store error: {expected_message}" in err
+
+
+def test_store_key_error(mocker, capsys):
+    mocker.patch(
+        "snapcraft.application.Application.run",
+        side_effect=craft_store.errors.NoKeyringError(),
+    )
+
+    return_code = application.main()
+
+    assert return_code == 1
+    _, err = capsys.readouterr()
+    assert err.startswith(
+        # There is merit in showing the line as it would be printed out.
+        # If it is too long here it needs fixing at the source.
+        # pylint: disable=[line-too-long]
+        dedent(
+            """\
+            craft-store error: No keyring found to store or retrieve credentials from.
+            Recommended resolution: Ensure the keyring is working or SNAPCRAFT_STORE_CREDENTIALS is correctly exported into the environment
+            For more information, check out: https://snapcraft.io/docs/snapcraft-authentication
+        """
+            # pylint: enable=[line-too-long]
+        )
     )

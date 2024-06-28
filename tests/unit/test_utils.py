@@ -40,69 +40,6 @@ def mock_is_managed_mode(mocker):
     yield mocker.patch("snapcraft.utils.is_managed_mode", return_value=False)
 
 
-@pytest.mark.parametrize(
-    "value",
-    [
-        "y",
-        "Y",
-        "yes",
-        "YES",
-        "Yes",
-        "t",
-        "T",
-        "true",
-        "TRUE",
-        "True",
-        "On",
-        "ON",
-        "oN",
-        "1",
-    ],
-)
-def test_strtobool_true(value: str):
-    assert utils.strtobool(value) is True
-
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        "n",
-        "N",
-        "no",
-        "NO",
-        "No",
-        "f",
-        "F",
-        "false",
-        "FALSE",
-        "False",
-        "off",
-        "OFF",
-        "oFF",
-        "0",
-    ],
-)
-def test_strtobool_false(value: str):
-    assert utils.strtobool(value) is False
-
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        "not",
-        "yup",
-        "negative",
-        "positive",
-        "whatever",
-        "2",
-        "3",
-    ],
-)
-def test_strtobool_value_error(value: str):
-    with pytest.raises(ValueError):
-        utils.strtobool(value)
-
-
 #####################
 # Get Host Platform #
 #####################
@@ -648,7 +585,6 @@ def test_confirm_with_user_pause_emitter(mock_isatty, emitter):
     """The emitter should be paused when using the terminal."""
     mock_isatty.return_value = True
 
-    # pylint: disable-next=unused-argument
     def fake_input(prompt):
         """Check if the Emitter is paused."""
         assert emitter.paused

@@ -27,6 +27,7 @@ from typing import Any, Optional
 import craft_application.commands as craft_app_commands
 import craft_cli
 import craft_parts
+import craft_store
 from craft_application import Application, AppMetadata, util
 from craft_cli import emit
 from craft_parts.plugins.plugins import PluginType
@@ -34,7 +35,7 @@ from overrides import override
 
 import snapcraft
 import snapcraft_legacy
-from snapcraft import cli, errors, models, services
+from snapcraft import cli, errors, models, services, store
 from snapcraft.extensions import apply_extensions
 from snapcraft.models.project import SnapcraftBuildPlanner, apply_root_packages
 from snapcraft.parts import set_global_environment
@@ -84,10 +85,11 @@ def _get_esm_error_for_base(base: str) -> None:
 class Snapcraft(Application):
     """Snapcraft application definition."""
 
+    _known_core24: bool
+    """True if the project should use the core24/craft-application codepath."""
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        # Whether we know that we should use the core24-based codepath.
-        self._known_core24 = False
         self._parse_info: dict[str, list[str]] = {}
 
         # Locate the project file. It's used in early execution to determine
@@ -98,12 +100,28 @@ class Snapcraft(Application):
             self._snapcraft_yaml_path: pathlib.Path | None = self._resolve_project_path(
                 None
             )
+            with self._snapcraft_yaml_path.open() as file:
+                self._snapcraft_yaml_data = util.safe_yaml_load(file)
         except FileNotFoundError:
-            self._snapcraft_yaml_path = None
+            self._snapcraft_yaml_path = self._snapcraft_yaml_data = None
+
+        self._known_core24 = self._get_known_core24()
 
         for craft_var, snapcraft_var in MAPPED_ENV_VARS.items():
             if env_val := os.getenv(snapcraft_var):
                 os.environ[craft_var] = env_val
+
+    def _get_known_core24(self) -> bool:
+        """Return true if the project is known to be core24."""
+        if self._snapcraft_yaml_data:
+            base = self._snapcraft_yaml_data.get("base")
+            build_base = self._snapcraft_yaml_data.get("build-base")
+
+            # We know for sure that we're handling a core24 project
+            if "core24" in (base, build_base) or build_base == "devel":
+                return True
+
+        return False
 
     def _get_app_plugins(self) -> dict[str, PluginType]:
         return plugins.get_plugins(core22=False)
@@ -112,8 +130,10 @@ class Snapcraft(Application):
     def _register_default_plugins(self) -> None:
         """Register per application plugins when initializing."""
         super()._register_default_plugins()
-        # dotnet is disabled for core24 because it is pending a rewrite
-        craft_parts.plugins.unregister("dotnet")
+
+        if self._known_core24:
+            # dotnet is disabled for core24 and newer because it is pending a rewrite
+            craft_parts.plugins.unregister("dotnet")
 
     @override
     def _configure_services(self, provider_name: str | None) -> None:
@@ -154,6 +174,34 @@ class Snapcraft(Application):
         return config
 
     @override
+    def run(self) -> int:
+        try:
+            return_code = super().run()
+        except craft_store.errors.NoKeyringError as err:
+            self._emit_error(
+                craft_cli.errors.CraftError(
+                    f"craft-store error: {err}",
+                    resolution=(
+                        "Ensure the keyring is working or "
+                        f"{store.constants.ENVIRONMENT_STORE_CREDENTIALS} "
+                        "is correctly exported into the environment"
+                    ),
+                    docs_url="https://snapcraft.io/docs/snapcraft-authentication",
+                )
+            )
+            return_code = 1
+        except craft_store.errors.CraftStoreError as err:
+            self._emit_error(
+                craft_cli.errors.CraftError(
+                    f"craft-store error: {err}", resolution=err.resolution
+                ),
+                cause=err,
+            )
+            return_code = 1
+
+        return return_code
+
+    @override
     def _setup_partitions(self, yaml_data: dict[str, Any]) -> list[str] | None:
         components = models.ComponentProject.unmarshal(yaml_data)
         if components.components is None:
@@ -190,29 +238,28 @@ class Snapcraft(Application):
 
     @override
     def _get_dispatcher(self) -> craft_cli.Dispatcher:
-        # Handle "multiplexing" of Snapcraft "codebases" depending on the
-        # project's base (if any). Here, we handle the case where there *is*
-        # a project and it's core24, which means it should definitely fall into
-        # the craft-application-based flow.
+        """Handle multiplexing of Snapcraft "codebases" depending on the project's base.
+
+        The ClassicFallback-based flow is used in any of the following scenarios:
+          - there is no project to load
+          - for core20 remote builds if SNAPCRAFT_REMOTE_BUILD_STRATEGY is not "disable-fallback"
+          - for core22 remote builds if SNAPCRAFT_REMOTE_BUILD_STRATEGY is "force-fallback"
+
+        The craft-application-based flow is used in any of the following scenarios:
+          - the project base is core24 or newer
+          - for the "version" command
+        """
         argv_command = self._get_argv_command()
         if argv_command == "lint":
             # We don't need to check for core24 if we're just linting
             return super()._get_dispatcher()
 
-        if self._snapcraft_yaml_path:
-            with self._snapcraft_yaml_path.open() as file:
-                yaml_data = util.safe_yaml_load(file)
-            base = yaml_data.get("base")
-            build_base = yaml_data.get("build-base")
+        if self._snapcraft_yaml_data:
+            base = self._snapcraft_yaml_data.get("base")
+            build_base = self._snapcraft_yaml_data.get("build-base")
             _get_esm_error_for_base(base)
-            if "core24" in (base, build_base) or build_base == "devel":
-                # We know for sure that we're handling a core24 project
-                self._known_core24 = True
-            elif (
-                argv_command == "version" or "--version" in sys.argv or "-V" in sys.argv
-            ):
-                pass
-            elif argv_command == "remote-build" and any(
+
+            if argv_command == "remote-build" and any(
                 b in ("core20", "core22") for b in (base, build_base)
             ):
                 build_strategy = os.environ.get("SNAPCRAFT_REMOTE_BUILD_STRATEGY", None)
@@ -239,7 +286,9 @@ class Snapcraft(Application):
                     and build_strategy == "force-fallback"
                 ):
                     raise errors.ClassicFallback()
-            else:
+            elif not self._known_core24 and not (
+                argv_command == "version" or "--version" in sys.argv or "-V" in sys.argv
+            ):
                 raise errors.ClassicFallback()
         return super()._get_dispatcher()
 
